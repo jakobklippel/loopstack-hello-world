@@ -1,0 +1,55 @@
+# Loopstack App
+
+This is a [Loopstack](https://loopstack.ai) app — a NestJS backend where AI workflows are code: state machines with explicit transitions, typed documents, and tools, all observable in Studio and from the CLI.
+
+## Where things live
+
+- `src/app.module.ts` — mounts `LoopstackModule.forRoot()` plus your app modules
+- `src/hello/` — a complete example: `hello.module.ts` (`@StudioApp` groups workflows into an app) and `hello.workflow.ts` (a minimal workflow)
+- `docker-compose.yml` — Postgres + Redis (Studio is a separate, optional `docker-compose.studio.yml` on http://localhost:5173; you don't need it — use the CLI below)
+- `.env` — configuration; add API keys here when a module needs them. In a hosted or sandboxed environment, secrets you've configured in Loopstack are already injected as environment variables at runtime — run `printenv NAME` to check before assuming a key (e.g. `ANTHROPIC_API_KEY`) is missing or adding it to `.env`
+
+## The feedback loop — use the CLI, not guesswork
+
+The `loopstack` CLI talks to the running backend (`npm run start:dev`, http://localhost:3000):
+
+```bash
+loopstack list                        # what can be run right now
+loopstack run <workflow> --arg k=v    # run it, streamed live; --json for machine-readable output
+loopstack runs                        # recent runs, waiting-for-input first
+loopstack runs <run-id>               # one run's audit trail (+ pendingPrompt under --json)
+loopstack answer <run-id> --arg k=v   # answer a waiting run's prompt non-interactively
+loopstack attach <run-id>             # rejoin a run live and answer its prompts interactively
+loopstack watch --json                # NDJSON event firehose while you develop
+```
+
+Exit codes: `0` completed, `1` failed, `2` connection/config error, `3` waiting for input in a non-interactive shell. After changing code, the dev server reloads automatically — rerun the workflow to verify.
+
+When a run exits `3`, it parked on a human question. Close the loop instead of stopping: read the question with `loopstack runs <run-id> --json` (the `pendingPrompt` field carries the description, the expected answer schema, and the transition), ask the human for their answer, submit it with `loopstack answer <run-id> --arg key=value`, then re-check `loopstack runs <run-id>` for the outcome. Never invent an answer to a human question yourself.
+
+## Writing workflows
+
+Follow `src/hello/hello.workflow.ts` as the canonical example:
+
+- A workflow is a class with `@Workflow({ title, description, schema })` extending `BaseWorkflow<Args>` (the zod `schema` types and validates its args); register it in the `@StudioApp` module.
+- Transitions are methods with `@Transition({ to: 'x' })` (initial, `from` defaults to `'start'`) or `@Transition({ from: 'x', to: 'end' })` (final). Signatures: `(state, ctx)` for automatic transitions, `(state, payload, ctx)` for wait transitions. Workflow args are on `ctx.args`.
+- A wait transition's `payload` always arrives as an **object** — `loopstack answer <run-id> --arg message=hi` (and `--payload`) sends `{ message: "hi" }`, never a bare scalar. Type its `schema` as `z.object({ … })` (e.g. `z.object({ message: z.string() })`) and read `payload.data.message`, not `z.string()`.
+- Transitions return nothing — mutate via `this.assignState(partial)` and publish results via `this.assignResult(partial)`. Use `async` only when the body awaits.
+- Documents are classes with `@Document({ schema })` (zod) saved via `this.documentStore.save(SomeDocument, data)` — they are what Studio renders.
+- Tools are NestJS providers with `@Tool({ name })`, implementing `protected async handle(args, ctx, options?): Promise<ToolEnvelope>`.
+
+## Testing
+
+Tests are ordinary vitest tests that run the real engine in-process — no backend, no database:
+
+- `runWorkflow(MyWorkflow, args, { providers, answers })` from `@loopstack/testing` executes the workflow and returns `{ status, path, result, documents, document(key) }` for assertions. Script HITL input with `answers: { waitTransitionName: payload }`; sub-workflows run inline.
+- `testTool().forTool(MyTool)` unit-tests a tool's `handle()` in isolation.
+- For deterministic LLM/tool regression tests, record a live run (`loopstack run <workflow> --trace`, then `loopstack runs <run-id> --record fixture.json`) and pass `replay: replay('fixture.json')` to `runWorkflow`. Omit `replay` to test against real providers — keep those assertions structural and run them on demand, not in CI.
+
+Write workflow tests for every non-trivial workflow you build. Guide: https://loopstack.ai/docs/build/testing
+
+## Learning more
+
+- Docs: https://loopstack.ai/docs — for agents, the full corpus is at https://loopstack.ai/llms.txt (route via titles, fetch what you need)
+- Registry of feature modules and examples (LLM providers, HITL prompts, agents, git, secrets, sandboxes): https://loopstack.ai/registry — each package README has an installation section; prefer adapting a registry example over building from scratch
+- CLI reference: https://loopstack.ai/docs/reference/cli
